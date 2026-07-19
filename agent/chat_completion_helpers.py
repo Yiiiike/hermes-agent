@@ -978,8 +978,49 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
 
 
+def _prepend_timestamp_to_last_user_message(messages: list) -> None:
+    """Prepend current timestamp to the last user message content.
+
+    Gives the model per-turn time awareness so it can detect when
+    significant real time has passed between user turns.  Uses a
+    compact ISO-8601-like format (``[YYYY-MM-DD HH:MM]``) that every
+    model understands without extra tokens or labels.
+
+    The dedup regex prevents double-prefixing across API-call retries:
+    ``build_api_kwargs`` is re-entered on each retry, but the in-memory
+    message list already carries the timestamp from the first attempt.
+    """
+    import re
+
+    from hermes_time import now as _hermes_now
+
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            content = msg.get("content")
+            if not content:
+                return
+
+            now = _hermes_now()
+            ts = now.strftime("[%Y-%m-%d %H:%M] ")
+
+            if isinstance(content, str):
+                if re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] ", content):
+                    return  # already prefixed (retry guard)
+                msg["content"] = ts + content
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text = part.get("text", "")
+                        if re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] ", text):
+                            return  # already prefixed (retry guard)
+                        part["text"] = ts + text
+                        break
+            return
+
+
 def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
+    _prepend_timestamp_to_last_user_message(api_messages)
     tools_for_api = agent.tools
 
     if agent.api_mode == "anthropic_messages":
